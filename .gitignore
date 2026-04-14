@@ -1,5 +1,5 @@
 .idea
-/cache/
+cache
 /output/
 /postgresql/cache/
 /postgresql/images/

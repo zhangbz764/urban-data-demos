@@ -34,8 +34,10 @@ def get_conn(dbname="Test20260413", user="postgres", password="we6666", host="lo
 
 def run_sql(sql, fetch=False, conn=None):
     """执行SQL语句，可选获取结果。"""
+    created_conn = False
     if conn is None:
         conn = get_conn()
+        created_conn = True
     cur = conn.cursor()
     try:
         cur.execute(sql)
@@ -47,5 +49,5 @@ def run_sql(sql, fetch=False, conn=None):
         raise e
     finally:
         cur.close()
-        if conn is None:  # Only close if we created it
+        if created_conn:
             conn.close()
