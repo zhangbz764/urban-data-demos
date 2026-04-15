@@ -3,29 +3,30 @@ AUTHOR: zhangbz
 PROJECT: UrbanPlayground
 DATE: 2026/4/13
 TIME: 13:55
-DESCRIPTION: 工具模块，提供命令执行和数据库操作函数。
+DESCRIPTION: Tool module that provides functions for command execution and database operations.
 """
 import subprocess
 import psycopg2
 
 
-def run_cmd(cmd):
-    """执行命令行命令，打印输出，失败时抛异常。"""
+def run_cmd(cmd, print_output=True):
+    """Execute command line commands, print output, raise exception on failure."""
     result = subprocess.run(
         cmd, shell=True,
         capture_output=True, text=True
     )
     if result.stdout:
-        print(result.stdout)
+        if print_output:
+            print(result.stdout)
     if result.stderr:
         print(result.stderr)
     if result.returncode != 0:
-        raise RuntimeError(f"命令失败，返回码：{result.returncode}")
+        raise RuntimeError(f"Command failed, return code: {result.returncode}")
     return result
 
 
 def get_conn(dbname="Test20260413", user="postgres", password="we6666", host="localhost", port="5432"):
-    """获取PostgreSQL数据库连接。"""
+    """Get PostgreSQL database connection."""
     return psycopg2.connect(
         dbname=dbname, user=user,
         password=password, host=host, port=port
@@ -33,7 +34,7 @@ def get_conn(dbname="Test20260413", user="postgres", password="we6666", host="lo
 
 
 def run_sql(sql, fetch=False, conn=None):
-    """执行SQL语句，可选获取结果。"""
+    """Execute SQL statements, optionally fetch results."""
     created_conn = False
     if conn is None:
         conn = get_conn()
