@@ -101,3 +101,130 @@ def insert_buildings_lod1(buildings, conn, lod1_table):
     conn.commit()
     cur.close()
     return len(rows)
+
+def parse_cityjson_lod2(filepath):
+    """Parse a single LOD2 CityJSON file, return a list of buildings with 2D footprint and classified 3D surfaces"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale = np.array(data["transform"]["scale"])
+    translate = np.array(data["transform"]["translate"])
+    vertices = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    buildings = []
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] != "Building":
+            continue
+
+        attrs = obj.get("attributes", {})
+        height = attrs.get("measuredHeight")
+        floor_count = attrs.get("storeysAboveGround")
+        function = attrs.get("function")
+        roof_type = attrs.get("roofType")
+        year_built = attrs.get("yearOfConstruction")
+
+        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == "2"), None)
+        if geom_entry is None:
+            continue
+
+        boundaries = geom_entry["boundaries"]
+        semantics = geom_entry.get("semantics", {})
+        surface_types = semantics.get("surfaces", [])
+        surface_values = semantics.get("values", [[]])[0]
+
+        # Classify and rebuild geometries by surface type
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        flat_values = []
+        for shell_values in semantics.get("values", []):
+            if isinstance(shell_values, list):
+                flat_values.extend(shell_values)
+            else:
+                flat_values.append(shell_values)
+
+        face_idx = 0
+        for shell in boundaries:
+            for face in shell:
+                # get surface type
+                stype = "Unknown"
+                if face_idx < len(flat_values):
+                    type_idx = flat_values[face_idx]
+                    if type_idx is not None and type_idx < len(surface_types):
+                        stype = surface_types[type_idx]["type"]
+
+                ring = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly = Polygon(coords)
+                    if stype in surfaces:
+                        surfaces[stype].append(poly)
+
+                face_idx += 1
+
+        # Extract 2D footprint from GroundSurface
+        if surfaces["GroundSurface"]:
+            ground = surfaces["GroundSurface"][0]
+            geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+        else:
+            continue
+
+        buildings.append({
+            "building_id": obj_id,
+            "height": height,
+            "floor_count": floor_count,
+            "function": function,
+            "roof_type": roof_type,
+            "year_built": year_built,
+            "geom_2d": geom_2d,
+            "surfaces": surfaces  # classified 3D surfaces
+        })
+
+    return buildings
+
+
+def insert_buildings_lod2(buildings, conn, lod2_table, surface_table):
+    """Batch insert LOD2 buildings into the database, main building table + surfaces sub-table"""
+    cur = conn.cursor()
+
+    sql_building = f"""
+        INSERT INTO {lod2_table}
+            (building_id, geom_2d, height, floor_count, function, roof_type, year_built)
+        VALUES (%s, ST_GeomFromText(%s, 25832), %s, %s, %s, %s, %s)
+        ON CONFLICT (building_id) DO NOTHING;
+    """
+
+    sql_surface = f"""
+        INSERT INTO {surface_table}
+            (building_id, surface_type, geom_3d)
+        VALUES (%s, %s, ST_GeomFromText(%s, 25832))
+    """
+
+    building_rows = []
+    surface_rows = []
+
+    for b in buildings:
+        building_rows.append((
+            b["building_id"],
+            wkt_dumps(b["geom_2d"]),
+            b["height"],
+            b["floor_count"],
+            b["function"],
+            b["roof_type"],
+            b["year_built"]
+        ))
+
+        for stype, polys in b["surfaces"].items():
+            for poly in polys:
+                # Keep 3D coordinates for surface table
+                surface_rows.append((
+                    b["building_id"],
+                    stype,
+                    wkt_dumps(poly)
+                ))
+
+    cur.executemany(sql_building, building_rows)
+    cur.executemany(sql_surface, surface_rows)
+    conn.commit()
+    cur.close()
+    return len(building_rows)
