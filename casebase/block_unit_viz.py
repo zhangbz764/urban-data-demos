@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "vienna"
+city_name = "hamburg"
 
 block_table_name        = f"{city_name}_blocks"
 lod2_table_name         = f"{city_name}_buildings_lod2"
