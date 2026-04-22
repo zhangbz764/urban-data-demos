@@ -346,6 +346,134 @@ def parse_cityjson_lod2_NL_AM(filepath, target_lod="2.2"):
 
     return buildings
 
+def parse_cityjson_lod2_CH_ZU(filepath, target_lod="2"):
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    def infer_surface_type(poly, base_z):
+        """通过几何法向量推断surface类型"""
+        coords = list(poly.exterior.coords)
+        z_values = [c[2] for c in coords if len(c) > 2]
+        if not z_values:
+            return "WallSurface"
+        try:
+            pts = np.array(coords[:3])
+            v1  = pts[1] - pts[0]
+            v2  = pts[2] - pts[0]
+            normal   = np.cross(v1, v2)
+            norm_len = np.linalg.norm(normal)
+            if norm_len > 0:
+                normal = normal / norm_len
+                if abs(normal[2]) > 0.7:
+                    return "GroundSurface" if min(z_values) <= base_z + 0.5 else "RoofSurface"
+        except:
+            pass
+        return "WallSurface"
+
+    buildings = []
+
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] not in ("Building", "BuildingPart"):
+            continue
+
+        attrs = obj.get("attributes", {})
+
+        # ── 属性提取（德语字段映射）────────────────────────────────────────
+        height      = attrs.get("measuredHeight") or (
+                        (attrs.get("DACH_MAX", 0) - attrs.get("GELAENDEPUNKT", 0))
+                        if "DACH_MAX" in attrs and "GELAENDEPUNKT" in attrs
+                        else None
+                      )
+        floor_count = round(height / 3.0) if height else None
+        function    = attrs.get("OBJEKTART")          # 建筑类型（德语）
+        roof_type   = None                             # 数据中无屋顶类型字段
+        year_built  = attrs.get("HERKUNFT_JAHR") or attrs.get("ERSTELLUNG_JAHR")
+        citygml_id  = obj_id
+
+        # ── 几何：优先取LOD2，同时兼容Solid和MultiSurface ────────────────
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        boundaries    = normalize_boundaries(geom_entry["boundaries"])
+        semantics     = geom_entry.get("semantics", {})
+        surface_types = semantics.get("surfaces", [])
+        values_raw    = normalize_values(semantics.get("values", []))
+
+        flat_values = []
+        for shell_values in values_raw:
+            if isinstance(shell_values, list):
+                flat_values.extend(shell_values)
+            else:
+                flat_values.append(shell_values)
+
+        # semantics可信判断：有>=3种定义且values包含>=3个不同值
+        unique_vals        = set(v for v in flat_values if v is not None)
+        semantics_reliable = (len(surface_types) >= 3 and len(unique_vals) >= 3)
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        # 先算base_z（用于几何推断）
+        base_z = float('inf')
+        for shell in boundaries:
+            for face in shell:
+                ring = face[0]
+                for vi in ring:
+                    z = real_vertices[vi][2]
+                    if z < base_z:
+                        base_z = z
+        if base_z == float('inf'):
+            base_z = 0.0
+
+        face_idx = 0
+        for shell in boundaries:
+            for face in shell:
+                stype       = None
+                scitygml_id = None
+
+                if semantics_reliable and face_idx < len(flat_values):
+                    type_idx = flat_values[face_idx]
+                    if type_idx is not None and type_idx < len(surface_types):
+                        stype       = surface_types[type_idx].get("type")
+                        scitygml_id = surface_types[type_idx].get("id")
+
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly  = Polygon(coords)
+                    stype = infer_surface_type(poly, base_z) \
+                            if stype not in ("RoofSurface", "WallSurface", "GroundSurface") \
+                            else stype
+                    surfaces[stype].append((poly, scitygml_id))
+
+                face_idx += 1
+
+        if not surfaces["GroundSurface"]:
+            continue
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  citygml_id,
+            "height":      height,
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
 
 # --------------------- Exception handling for data standardization ---------------------
 
