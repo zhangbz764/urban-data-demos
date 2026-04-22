@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "hamburg"
+city_name = "montreal"
 
 block_table_name        = f"{city_name}_blocks"
 lod2_table_name         = f"{city_name}_buildings_lod2"
@@ -28,7 +28,9 @@ lod2_surface_table_name = f"{city_name}_building_surfaces_lod2"
 # 获取 block 列表
 # ==============================
 sql_blocks = f"""
-    SELECT bl.block_id, ST_AsText(bl.geom) AS geom_wkt
+    SELECT bl.block_id, ST_AsText(bl.geom) AS geom_wkt, 
+           ST_X(bl.centroid::geometry) AS lon, 
+           ST_Y(bl.centroid::geometry) AS lat
     FROM {block_table_name} bl
     WHERE EXISTS (
         SELECT 1 FROM {lod2_table_name} b
@@ -39,8 +41,10 @@ sql_blocks = f"""
 """
 rows = utils_z.run_sql(sql_blocks, conn=conn, fetch=True)
 
-block_ids  = [str(r[0]) for r in rows]
-block_wkts = [r[1] for r in rows]
+block_ids           = [str(r[0]) for r in rows]
+block_wkts          = [r[1] for r in rows]
+block_centroids_lon = [r[2] for r in rows]  # 经度
+block_centroids_lat = [r[3] for r in rows]  # 纬度
 
 print(f"Selected {len(block_ids)} blocks")
 
@@ -162,6 +166,8 @@ current_idx = [0]
 # ==============================
 def update_scene(idx):
     block_id = block_ids[idx]
+    lon = block_centroids_lon[idx]
+    lat = block_centroids_lat[idx]
     print(f"显示 {idx+1}/30: {block_id}")
 
     plotter.clear()
@@ -210,8 +216,10 @@ def update_scene(idx):
             line_width=2
         )
 
+
+    # 显示 Block ID 和中心点坐标
     plotter.add_text(
-        f"Block: {block_id}   [{idx+1}/30]\nJ/K 切换   Q 退出",
+        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nJ/K 切换   Q 退出",
         position="upper_left",
         font_size=11
     )

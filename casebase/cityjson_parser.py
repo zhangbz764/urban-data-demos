@@ -8,7 +8,7 @@ DESCRIPTION: This module provides functions to parse CityJSON files, specificall
 
 import json
 import numpy as np
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon
 from shapely.ops import unary_union
 from shapely.wkt import dumps as wkt_dumps
 
@@ -102,7 +102,7 @@ def insert_buildings_lod1(buildings, conn, lod1_table):
     cur.close()
     return len(rows)
 
-def parse_cityjson_lod2(filepath):
+def parse_cityjson_lod2(filepath, target_lod="2"):
     """Parse a single LOD2 CityJSON file, return buildings with 2D footprint and classified 3D surfaces"""
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -124,7 +124,7 @@ def parse_cityjson_lod2(filepath):
         roof_type = attrs.get("roofType")
         year_built = attrs.get("yearOfConstruction")
 
-        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == "2"), None) # TODO: handle "2.2" case
+        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod), None) # TODO: handle "2.2" case
         if geom_entry is None:
             continue
 
@@ -167,6 +167,12 @@ def parse_cityjson_lod2(filepath):
             geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
         else:
             continue
+
+        # If no height specified, use RoofSurface maximum Z minus GroundSurface minimum Z
+        if height == None:
+            roof_z  = max(c[2] for poly, _ in surfaces["RoofSurface"]  for c in poly.exterior.coords)
+            ground_z = min(c[2] for poly, _ in surfaces["GroundSurface"] for c in poly.exterior.coords)
+            height = roof_z - ground_z
 
         buildings.append({
             "citygml_id": obj_id, 
@@ -339,86 +345,7 @@ def parse_cityjson_lod2_NL_AM(filepath, target_lod="2.2"):
         })
 
     return buildings
-# def parse_cityjson_lod2_NL_AM(filepath, target_lod="2.2"):
-    with open(filepath, "r", encoding="utf-8") as f:
-        data = json.load(f)
 
-    scale     = np.array(data["transform"]["scale"])
-    translate = np.array(data["transform"]["translate"])
-    vertices  = np.array(data["vertices"])
-    real_vertices = vertices * scale + translate
-
-    buildings = []
-    for obj_id, obj in data["CityObjects"].items():
-        if obj["type"] != "BuildingPart":
-            continue
-
-        attrs = obj.get("attributes", {})
-        height      = attrs.get("b3_h_dak_50p")       # Roof height at 50th percentile
-        floor_count = attrs.get("b3_bouwlagen")        # Number of floors
-        function    = attrs.get("status")              # Building status as function
-        roof_type   = attrs.get("b3_dak_type")         # Roof type
-        year_built  = attrs.get("oorspronkelijkbouwjaar")
-
-        geom_entry = next(
-            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
-            None
-        )
-        if geom_entry is None:
-            continue
-
-        boundaries   = normalize_boundaries(geom_entry["boundaries"])
-        semantics    = geom_entry.get("semantics", {})
-        surface_types = semantics.get("surfaces", [])
-        values_raw   = normalize_values(semantics.get("values", []))
-
-        flat_values = []
-        for shell_values in values_raw:
-            if isinstance(shell_values, list):
-                flat_values.extend(shell_values)
-            else:
-                flat_values.append(shell_values)
-
-        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
-
-        face_idx = 0
-        for shell in boundaries:
-            for face in shell:
-                stype      = "Unknown"
-                scitygml_id = None
-                if face_idx < len(flat_values):
-                    type_idx = flat_values[face_idx]
-                    if type_idx is not None and type_idx < len(surface_types):
-                        stype       = surface_types[type_idx].get("type", "Unknown")
-                        scitygml_id = surface_types[type_idx].get("id")
-
-                ring   = face[0]
-                coords = [tuple(real_vertices[i]) for i in ring]
-                if len(coords) >= 3:
-                    poly = Polygon(coords)
-                    if stype in surfaces:
-                        surfaces[stype].append((poly, scitygml_id))
-
-                face_idx += 1
-
-        if not surfaces["GroundSurface"]:
-            continue
-
-        ground   = surfaces["GroundSurface"][0][0]
-        geom_2d  = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
-
-        buildings.append({
-            "citygml_id":  obj_id,
-            "height":      height,
-            "floor_count": floor_count,
-            "function":    function,
-            "roof_type":   roof_type,
-            "year_built":  year_built,
-            "geom_2d":     geom_2d,
-            "surfaces":    surfaces
-        })
-
-    return buildings
 
 # --------------------- Exception handling for data standardization ---------------------
 
