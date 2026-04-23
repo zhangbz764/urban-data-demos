@@ -475,6 +475,91 @@ def parse_cityjson_lod2_CH_ZU(filepath, target_lod="2"):
 
     return buildings
 
+def parse_cityjson_lod2_LU_LU(filepath, target_lod="2"):
+    """Parse LOD2 CityJSON for Luxembourg City"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+    real_vertices = real_vertices[:, [1, 0, 2]]  # 把列顺序从[X,Y,Z]改为[Y,X,Z]
+
+    buildings = []
+
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] != "Building":
+            continue
+
+        attrs = obj.get("attributes", {})
+
+        height      = attrs.get("measuredHeight")
+        floor_count = round(height / 3.0) if height else None
+        function    = None   # name字段是行政区名，不是建筑功能，不录入
+        roof_type   = None
+        year_built  = None   # creationDate是数据生产日期，不是建造年份
+
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        boundaries    = normalize_boundaries(geom_entry["boundaries"])
+        semantics     = geom_entry.get("semantics", {})
+        surface_types = semantics.get("surfaces", [])
+        values_raw    = normalize_values(semantics.get("values", []))
+
+        flat_values = []
+        for shell_values in values_raw:
+            if isinstance(shell_values, list):
+                flat_values.extend(shell_values)
+            else:
+                flat_values.append(shell_values)
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        face_idx = 0
+        for shell in boundaries:
+            for face in shell:
+                stype       = "Unknown"
+                scitygml_id = None
+                if face_idx < len(flat_values):
+                    type_idx = flat_values[face_idx]
+                    if type_idx is not None and type_idx < len(surface_types):
+                        stype       = surface_types[type_idx].get("type", "Unknown")
+                        scitygml_id = surface_types[type_idx].get("id")
+
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly = Polygon(coords)
+                    if stype in surfaces:
+                        surfaces[stype].append((poly, scitygml_id))
+
+                face_idx += 1
+
+        if not surfaces["GroundSurface"]:
+            continue
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
+
 # --------------------- Exception handling for data standardization ---------------------
 
 # Handle inconsistent boundary hierarchy issues

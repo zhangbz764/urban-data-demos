@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "zurich"
+city_name = "luxembourg"
 
 block_table_name        = f"{city_name}_blocks"
 lod2_table_name         = f"{city_name}_buildings_lod2"
@@ -128,11 +128,12 @@ def build_block_mesh(idx):
     for stype, wkt in surfaces:
         try:
             poly = wkt_loads(wkt)
-            mesh = polygon_to_mesh(
-                list(poly.exterior.coords), cx, cy, base_z,
-                meters_per_deg_lon, meters_per_deg_lat
-            )
-            if mesh is None:
+            coords = list(poly.exterior.coords)
+            if len(coords) < 4:
+                continue
+            mesh = polygon_to_mesh(coords, cx, cy, base_z,
+                                meters_per_deg_lon, meters_per_deg_lat)
+            if mesh is None or mesh.n_points == 0:
                 continue
 
             if stype == "RoofSurface":
@@ -143,6 +144,8 @@ def build_block_mesh(idx):
                 color = [150, 150, 140]
 
             mesh["color"] = np.tile(color, (mesh.n_cells, 1))
+            if mesh.n_cells == 0:
+                continue
             meshes.append(mesh)
 
         except Exception as e:
