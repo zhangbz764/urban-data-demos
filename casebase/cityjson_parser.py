@@ -169,10 +169,13 @@ def parse_cityjson_lod2(filepath, target_lod="2"):
             continue
 
         # If no height specified, use RoofSurface maximum Z minus GroundSurface minimum Z
-        if height == None:
-            roof_z  = max(c[2] for poly, _ in surfaces["RoofSurface"]  for c in poly.exterior.coords)
-            ground_z = min(c[2] for poly, _ in surfaces["GroundSurface"] for c in poly.exterior.coords)
-            height = roof_z - ground_z
+        if height is None:
+            if surfaces["RoofSurface"] and surfaces["GroundSurface"]:
+                roof_z = max(c[2] for poly, _ in surfaces["RoofSurface"] for c in poly.exterior.coords)
+                ground_z = min(c[2] for poly, _ in surfaces["GroundSurface"] for c in poly.exterior.coords)
+                height = roof_z - ground_z
+            else:
+                continue
 
         buildings.append({
             "citygml_id": obj_id, 
