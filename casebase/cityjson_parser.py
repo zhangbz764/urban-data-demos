@@ -124,7 +124,7 @@ def parse_cityjson_lod2(filepath, target_lod="2"):
         roof_type = attrs.get("roofType")
         year_built = attrs.get("yearOfConstruction")
 
-        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod), None) # TODO: handle "2.2" case
+        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod), None)
         if geom_entry is None:
             continue
 
@@ -484,7 +484,7 @@ def parse_cityjson_lod2_LU_LU(filepath, target_lod="2"):
     translate     = np.array(data["transform"]["translate"])
     vertices      = np.array(data["vertices"])
     real_vertices = vertices * scale + translate
-    real_vertices = real_vertices[:, [1, 0, 2]]  # 把列顺序从[X,Y,Z]改为[Y,X,Z]
+    real_vertices = real_vertices[:, [1, 0, 2]]  # 左手坐标系, 把列顺序从[X,Y,Z]改为[Y,X,Z]
 
     buildings = []
 
@@ -560,6 +560,324 @@ def parse_cityjson_lod2_LU_LU(filepath, target_lod="2"):
 
     return buildings
 
+def parse_cityjson_lod2_AT_LZ(filepath, target_lod="3"):
+    """Parse LOD2 CityJSON for Linz (Austria), LOD is labelled as 3"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    buildings = []
+
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] not in ("Building", "BuildingPart"):
+            continue
+
+        attrs = obj.get("attributes", {})
+
+        height      = attrs.get("LoD1 Hoehe")
+        floor_count = round(height / 3.0) if height else None
+        function    = None
+        roof_type   = None
+        year_built  = None
+
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        boundaries    = normalize_boundaries(geom_entry["boundaries"])
+        semantics     = geom_entry.get("semantics", {})
+        surface_types = semantics.get("surfaces", [])
+        values_raw    = normalize_values(semantics.get("values", []))
+
+        flat_values = []
+        for shell_values in values_raw:
+            if isinstance(shell_values, list):
+                flat_values.extend(shell_values)
+            else:
+                flat_values.append(shell_values)
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        face_idx = 0
+        for shell in boundaries:
+            for face in shell:
+                stype       = "Unknown"
+                scitygml_id = None
+                if face_idx < len(flat_values):
+                    type_idx = flat_values[face_idx]
+                    if type_idx is not None and type_idx < len(surface_types):
+                        stype       = surface_types[type_idx].get("type", "Unknown")
+                        scitygml_id = surface_types[type_idx].get("id")
+
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly = Polygon(coords)
+                    if stype in surfaces:
+                        surfaces[stype].append((poly, scitygml_id))
+
+                face_idx += 1
+
+        # 跳过没有GroundSurface的建筑（占比3.3%，直接忽略）
+        if not surfaces["GroundSurface"]:
+            continue
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
+
+def parse_cityjson_lod2_BE_NA(filepath, target_lod="2"):
+    """Parse LOD2 CityJSON for Namur (Belgium)
+    无semantics，surface类型通过法向量推断
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    def infer_surface_type(poly, base_z, building_height):
+        coords   = list(poly.exterior.coords)
+        z_values = [c[2] for c in coords if len(c) > 2]
+        if not z_values:
+            return "WallSurface"
+
+        z_min   = min(z_values)
+        z_max   = max(z_values)
+        z_range = z_max - z_min
+
+        ground_threshold = max(0.3, building_height * 0.05) if building_height else 0.3
+
+        # 计算法向量（遍历顶点找非共线的三点）
+        normal_z = None
+        for i in range(len(coords) - 2):
+            try:
+                pts = np.array(coords[i:i+3])
+                v1  = pts[1] - pts[0]
+                v2  = pts[2] - pts[0]
+                n   = np.cross(v1, v2)
+                norm_len = np.linalg.norm(n)
+                if norm_len > 1e-6:
+                    normal_z = abs(n[2] / norm_len)
+                    break
+            except:
+                continue
+
+        # ── GroundSurface判断（同时满足两个条件）────────────────────────────
+        # 条件1：Z值接近base_z
+        # 条件2：面几乎水平（z_range极小 或 法向量Z分量很大）
+        is_near_ground = z_min <= base_z + ground_threshold
+        is_horizontal  = z_range < 0.15 or (normal_z is not None and normal_z > 0.95)
+        if is_near_ground and is_horizontal:
+            return "GroundSurface"
+
+        # ── RoofSurface判断────────────────────────────────────────────────
+        # 条件1：Z值整体高于地面（不与base_z接近）
+        # 条件2：面有一定水平分量（法向量Z分量 > 0.3，覆盖大坡度屋顶）
+        #     或者：面几乎水平（z_range小）
+        is_above_ground = z_min > base_z + ground_threshold
+        is_roof_like    = (normal_z is not None and normal_z > 0.3) or z_range < 0.3
+        if is_above_ground and is_roof_like:
+            return "RoofSurface"
+
+        # ── 其余为WallSurface─────────────────────────────────────────────
+        return "WallSurface"
+
+    buildings = []
+
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] != "Building":
+            continue
+
+        attrs = obj.get("attributes", {})
+
+        height      = attrs.get("measuredHeight")
+        floor_count = round(height / 3.0) if height else None
+        function    = None
+        roof_type   = None
+        year_built  = None
+
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        boundaries = normalize_boundaries(geom_entry["boundaries"])
+
+        # 先算base_z，用于法向量推断时判断地面/屋顶
+        base_z = float('inf')
+        for shell in boundaries:
+            for face in shell:
+                ring = face[0]
+                for vi in ring:
+                    z = real_vertices[vi][2]
+                    if z < base_z:
+                        base_z = z
+        if base_z == float('inf'):
+            base_z = 0.0
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        for shell in boundaries:
+            for face in shell:
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly  = Polygon(coords)
+                    stype = infer_surface_type(poly, base_z, height)
+                    surfaces[stype].append((poly, None))  # 无citygml_id
+
+        if not surfaces["GroundSurface"]:
+            continue
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
+
+def parse_cityjson_lod2_CZ_PR(filepath):
+    """Parse LOD2 CityJSON for Prague (Czech Republic)
+    - LOD标注为3，实为LOD2
+    - 几何在BuildingPart里，属性在Building和BuildingPart里
+    - EPSG:5514，X,Y顺序正常，无需轴互换
+    """
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    # ── 建立Building属性查找表 ────────────────────────────────────────────
+    building_attrs = {}
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] == "Building":
+            building_attrs[obj_id] = obj.get("attributes", {})
+
+    buildings = []
+
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] not in ("Building", "BuildingPart"):
+            continue
+
+        # ── 属性：优先用自身，fallback到父级Building ─────────────────────
+        own_attrs   = obj.get("attributes", {})
+        parent_id   = obj_id.rsplit("-", 1)[0]
+        parent_attrs = building_attrs.get(parent_id, {})
+        attrs       = {**parent_attrs, **own_attrs}  # 自身属性覆盖父级
+
+        roof_type   = attrs.get("usage")   # 捷克语屋顶类型描述
+        height      = None                 # 从几何计算
+        floor_count = None
+        function    = None
+        year_built  = None
+
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == "3"),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        boundaries    = normalize_boundaries(geom_entry["boundaries"])
+        semantics     = geom_entry.get("semantics", {})
+        surface_types = semantics.get("surfaces", [])
+        values_raw    = normalize_values(semantics.get("values", []))
+
+        flat_values = []
+        for shell_values in values_raw:
+            if isinstance(shell_values, list):
+                flat_values.extend(shell_values)
+            else:
+                flat_values.append(shell_values)
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        face_idx = 0
+        for shell in boundaries:
+            for face in shell:
+                stype       = "Unknown"
+                scitygml_id = None
+                if face_idx < len(flat_values):
+                    type_idx = flat_values[face_idx]
+                    if type_idx is not None and type_idx < len(surface_types):
+                        stype       = surface_types[type_idx].get("type", "Unknown")
+                        scitygml_id = surface_types[type_idx].get("id")
+
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    poly = Polygon(coords)
+                    if stype in surfaces:
+                        surfaces[stype].append((poly, scitygml_id))
+
+                face_idx += 1
+
+        if not surfaces["GroundSurface"]:
+            continue
+
+        # ── 从几何计算height ──────────────────────────────────────────────
+        try:
+            roof_z_values   = [c[2] for poly, _ in surfaces["RoofSurface"]
+                                     for c in poly.exterior.coords]
+            ground_z_values = [c[2] for poly, _ in surfaces["GroundSurface"]
+                                     for c in poly.exterior.coords]
+            if roof_z_values and ground_z_values:
+                height      = max(roof_z_values) - min(ground_z_values)
+                floor_count = round(height / 3.0) if height > 0 else None
+        except:
+            pass
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
 # --------------------- Exception handling for data standardization ---------------------
 
 # Handle inconsistent boundary hierarchy issues
