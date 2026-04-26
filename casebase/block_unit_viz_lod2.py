@@ -22,8 +22,8 @@ city_name = "newyork"
 z_scale = 1 # 米
 
 block_table_name        = f"blocks.{city_name}_blocks"
-lod2_table_name         = f"{city_name}_buildings_lod2"
-lod2_surface_table_name = f"{city_name}_building_surfaces_lod2"
+lod2_table_name         = f"lod2.{city_name}_buildings_lod2"
+lod2_surface_table_name = f"lod2.{city_name}_building_surfaces_lod2"
 
 
 # ==============================
