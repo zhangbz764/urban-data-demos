@@ -17,7 +17,9 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "rotterdam"
+city_name = "newyork"
+# z_scale = 0.3048  # 英尺
+z_scale = 1 # 米
 
 block_table_name        = f"blocks.{city_name}_blocks"
 lod2_table_name         = f"{city_name}_buildings_lod2"
@@ -65,12 +67,12 @@ def fetch_surfaces(block_id):
 # ==============================
 # polygon → triangulated mesh
 # ==============================
-def polygon_to_mesh(coords, cx, cy, base_z, meters_per_deg_lon, meters_per_deg_lat):
+def polygon_to_mesh(coords, cx, cy, base_z, meters_per_deg_lon, meters_per_deg_lat, z_scale=1.0):
     pts = np.array([
         [
             (c[0] - cx) * meters_per_deg_lon,
             (c[1] - cy) * meters_per_deg_lat,
-            (c[2] if len(c) > 2 else base_z) - base_z
+            ((c[2] if len(c) > 2 else base_z) - base_z) * z_scale # meters or feet height
         ]
         for c in coords[:-1]
     ])
@@ -132,7 +134,7 @@ def build_block_mesh(idx):
             if len(coords) < 4:
                 continue
             mesh = polygon_to_mesh(coords, cx, cy, base_z,
-                                meters_per_deg_lon, meters_per_deg_lat)
+                                meters_per_deg_lon, meters_per_deg_lat, z_scale)
             if mesh is None or mesh.n_points == 0:
                 continue
 
