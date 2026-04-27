@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "berlin"
+city_name = "sanfrancisco"
 # z_scale = 0.3048  # 英尺
 z_scale = 1 # 米
 
@@ -31,7 +31,8 @@ lod1_surface_table_name = f"lod1.{city_name}_building_surfaces_lod1"
 sql_blocks = f"""
     SELECT bl.block_id, ST_AsText(bl.geom) AS geom_wkt, 
            ST_X(bl.centroid::geometry) AS lon, 
-           ST_Y(bl.centroid::geometry) AS lat
+           ST_Y(bl.centroid::geometry) AS lat,
+           bl.area_m2
     FROM {block_table_name} bl
     WHERE EXISTS (
         SELECT 1 FROM {lod1_table_name} b
@@ -46,6 +47,7 @@ block_ids           = [str(r[0]) for r in rows]
 block_wkts          = [r[1] for r in rows]
 block_centroids_lon = [r[2] for r in rows]  # 经度
 block_centroids_lat = [r[3] for r in rows]  # 纬度
+block_areas         = [float(r[4]) for r in rows]  # 面积（平方米）
 
 print(f"Selected {len(block_ids)} blocks")
 
@@ -145,8 +147,7 @@ def build_block_mesh(idx):
                 color = [150, 150, 140]
 
             mesh["color"] = np.tile(color, (mesh.n_cells, 1))
-            if mesh.n_cells == 0:
-                continue
+            
             meshes.append(mesh)
 
         except Exception as e:
@@ -220,14 +221,13 @@ def update_scene(idx):
             line_width=2
         )
 
-
-    # 显示 Block ID 和中心点坐标
+    # 显示 Block ID、中心点坐标和面积
+    area = block_areas[idx]
     plotter.add_text(
-        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nJ/K 切换   Q 退出",
+        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nArea: {area:.2f} m²\nJ/K 切换   Q 退出",
         position="upper_left",
         font_size=11
     )
-
     plotter.reset_camera()
 
 

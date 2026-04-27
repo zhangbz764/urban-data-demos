@@ -12,6 +12,7 @@ from shapely.geometry import Polygon
 from shapely.wkt import dumps as wkt_dumps
 
 def parse_cityjson_lod1(filepath, target_lod="1"):
+    """解析CityJSON文件并提取LOD1建筑物数据。"""
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -99,7 +100,7 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
 def insert_buildings_lod1(buildings, conn, lod1_table, surface_table,
                            city_prefix, target_srid, source_srid,
                            building_counter, surface_counter):
-    """Batch insert LOD1 buildings and surfaces into the database."""
+    """批量插入LOD1建筑物和表面数据到数据库，支持坐标系转换。"""
     cur = conn.cursor()
 
     if source_srid == target_srid:
@@ -156,6 +157,7 @@ def insert_buildings_lod1(buildings, conn, lod1_table, surface_table,
 
 # --------------------- Special parser & insert: Amsterdam ---------------------
 def parse_cityjson_lod1_NL_AM(filepath, target_lod="1.3"):
+    """解析阿姆斯特丹CityJSON数据，从BuildingPart继承父级Building属性。"""
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -237,6 +239,95 @@ def parse_cityjson_lod1_NL_AM(filepath, target_lod="1.3"):
 
     return buildings
 
+def parse_cityjson_lod1_US(filepath, target_lod="1"):
+    """解析美国CityJSON数据，处理可选的transform字段和相对高度。"""
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # 空文件检查（最先）
+    if not data.get("CityObjects") or not data.get("vertices"):
+        print(f"空文件，跳过：{filepath}")
+        return []
+
+    # transform判断
+    if "transform" in data:
+        scale = np.array(data["transform"]["scale"])
+        if np.all(scale == 0):
+            print(f"无效scale，跳过：{filepath}")
+            return []
+        translate = np.array(data["transform"]["translate"])
+        real_vertices = np.array(data["vertices"]) * scale + translate
+    else:
+        real_vertices = np.array(data["vertices"])
+
+    buildings = []
+    no_lod1_count = 0
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] not in ("Building", "BuildingPart"):
+            continue
+
+        attrs = obj.get("attributes", {})
+
+        height = attrs.get("measuredHeight")
+        floor_count = attrs.get("storeysAboveGround")
+        function = attrs.get("function")
+
+        geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod), None)
+        if geom_entry is None:
+            no_lod1_count += 1
+            # if no_lod1_count <= 2:  # 只打印前3条
+            #     print(f"No LOD1 geometry for building: {obj_id}")
+            continue
+
+        faces = []
+        for shell in geom_entry["boundaries"]:
+            for face in shell:
+                ring = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    faces.append(Polygon(coords))
+
+        if not faces:
+            print(f"No valid faces for building: {obj_id}")
+            continue
+
+        surfaces = classify_surfaces_flat(faces)
+
+        # 直接从分类结果里取底面和顶面
+        ground_face = next((f for stype, f in surfaces if stype == "GroundSurface"), None)
+        roof_face = next((f for stype, f in surfaces if stype == "RoofSurface"), None)
+
+        if ground_face is None:
+            print(f"No ground face for building: {obj_id} >>> {filepath}") 
+            continue
+
+        ground_z = float(np.mean([c[2] for c in ground_face.exterior.coords]))
+
+        if height is None:
+            if roof_face is None:
+                print(f"No roof face and no height attribute for building: {obj_id}")
+                continue
+            top_z = float(np.mean([c[2] for c in roof_face.exterior.coords]))
+            height = top_z - ground_z
+        else:
+            height = float(height)
+
+        geom_2d = Polygon([(c[0], c[1]) for c in ground_face.exterior.coords])
+
+        buildings.append({
+            "citygml_id": obj_id,
+            "height": height,
+            "ground_z": ground_z,
+            "floor_count": floor_count,
+            "function": function,
+            "geom_2d": geom_2d,
+            "surfaces": surfaces
+        })
+    # if no_lod1_count > 0:
+    #     print(f"{filepath} >>> 总共 {no_lod1_count} 个建筑无 LOD1 几何")
+    return buildings
+
+
 # --------------------- Exception handling for data standardization ---------------------
 
 # def get_normal(poly):
@@ -255,6 +346,7 @@ def parse_cityjson_lod1_NL_AM(filepath, target_lod="1.3"):
 #     return normal / norm
 
 def get_normal(poly):
+    """计算多边形的法向量，用于识别表面朝向。"""
     pts = np.array(poly.exterior.coords[:-1])
     if len(pts) < 3 or pts.shape[1] != 3:
         return None
@@ -274,6 +366,7 @@ def get_normal(poly):
     return None
 
 def classify_surfaces(faces):
+    """根据法向量将面分类为地面、屋顶和墙体。"""
     horizontal = []
     surfaces = []
     
@@ -299,4 +392,21 @@ def classify_surfaces(faces):
         stype = "GroundSurface" if z_mean < np.mean(z_all) else "RoofSurface"
         surfaces.append((stype, horizontal[0]))
     
+    return surfaces
+
+def classify_surfaces_flat(faces):
+    """根据Z值分类面，适用于相对高度数据（Z为相对值，XY为经纬度）。"""
+    z_means = [(np.mean([c[2] for c in f.exterior.coords]), f) for f in faces]
+    z_values = [z for z, _ in z_means]
+    z_min = min(z_values)
+    z_max = max(z_values)
+    
+    surfaces = []
+    for z_mean, face in z_means:
+        if abs(z_mean - z_min) < 0.01:
+            surfaces.append(("GroundSurface", face))
+        elif abs(z_mean - z_max) < 0.01:
+            surfaces.append(("RoofSurface", face))
+        else:
+            surfaces.append(("WallSurface", face))
     return surfaces
