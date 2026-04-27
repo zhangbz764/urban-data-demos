@@ -48,33 +48,28 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
             print(f"No valid faces for building: {obj_id}")
             continue
 
-        # 底面：Z均值最低的面
-        bottom_face = min(faces, key=lambda p: np.mean([c[2] for c in p.exterior.coords]))
-        # 顶面：Z均值最高的面
-        top_face = max(faces, key=lambda p: np.mean([c[2] for c in p.exterior.coords]))
+        surfaces = classify_surfaces(faces)
 
-        ground_z = float(np.mean([c[2] for c in bottom_face.exterior.coords]))
+        # 直接从分类结果里取底面和顶面
+        ground_face = next((f for stype, f in surfaces if stype == "GroundSurface"), None)
+        roof_face = next((f for stype, f in surfaces if stype == "RoofSurface"), None)
 
-        # 没有属性高度时从几何计算
+        if ground_face is None:
+            print(f"No ground face for building: {obj_id}")
+            continue
+
+        ground_z = float(np.mean([c[2] for c in ground_face.exterior.coords]))
+
         if height is None:
-            top_z = float(np.mean([c[2] for c in top_face.exterior.coords]))
+            if roof_face is None:
+                print(f"No roof face and no height attribute for building: {obj_id}")
+                continue
+            top_z = float(np.mean([c[2] for c in roof_face.exterior.coords]))
             height = top_z - ground_z
         else:
             height = float(height)
 
-        geom_2d = Polygon([(c[0], c[1]) for c in bottom_face.exterior.coords])
-
-        # 判断surface_type
-        surfaces = []
-        for face in faces:
-            z_mean = np.mean([c[2] for c in face.exterior.coords])
-            if abs(z_mean - ground_z) < 0.1:
-                stype = "GroundSurface"
-            elif abs(z_mean - (ground_z + height)) < 0.5:
-                stype = "RoofSurface"
-            else:
-                stype = "WallSurface"
-            surfaces.append((stype, face))
+        geom_2d = Polygon([(c[0], c[1]) for c in ground_face.exterior.coords])
 
         buildings.append({
             "citygml_id": obj_id,
@@ -149,26 +144,42 @@ def insert_buildings_lod1(buildings, conn, lod1_table, surface_table,
 
 # --------------------- Exception handling for data standardization ---------------------
 
-# Handle inconsistent boundary hierarchy issues
-# Determine if the first-level element is a list of lists (normal shell) or a list of ints (missing shell layer)
-def normalize_boundaries(boundaries):
-    """Normalize boundaries into 3 levels of nesting: shell > face > ring"""
-    if not boundaries:
-        return []
-    first = boundaries[0]
-    # Normal case: first is a shell, i.e., list of faces, where each face is a list of rings
-    # Exception case: first is directly a face, i.e., list of rings, where each ring is a list of ints
-    if isinstance(first[0][0], int):
-        # Missing shell layer, wrap it in one layer
-        return [boundaries]
-    return boundaries
+def get_normal(poly):
+    coords = np.array(poly.exterior.coords[:-1])
+    if len(coords) < 3:
+        return None
+    v1 = coords[1] - coords[0]
+    v2 = coords[2] - coords[0]
+    normal = np.cross(v1, v2)
+    norm = np.linalg.norm(normal)
+    if norm == 0:
+        return None
+    return normal / norm
 
-# Handle semantics values in the same way
-def normalize_values(values):
-    """Normalize values into 2 levels of nesting: [[...]]"""
-    if not values:
-        return [[]]
-    if isinstance(values[0], int) or values[0] is None:
-        # Missing outer list
-        return [values]
-    return values
+def classify_surfaces(faces):
+    horizontal = []
+    surfaces = []
+    
+    for face in faces:
+        normal = get_normal(face)
+        if normal is None:
+            continue
+        # Z分量绝对值接近1说明是水平面
+        if abs(normal[2]) > 0.9:  # 阈值可调
+            horizontal.append(face)
+        else:
+            surfaces.append(("WallSurface", face))
+    
+    # 水平面里按Z均值区分底面和顶面
+    if len(horizontal) >= 2:
+        horizontal.sort(key=lambda p: np.mean([c[2] for c in p.exterior.coords]))
+        surfaces.append(("GroundSurface", horizontal[0]))
+        surfaces.append(("RoofSurface", horizontal[-1]))
+    elif len(horizontal) == 1:
+        # 只有一个水平面，用Z均值和ground_z比较判断
+        z_mean = np.mean([c[2] for c in horizontal[0].exterior.coords])
+        z_all = [np.mean([c[2] for c in f.exterior.coords]) for f in faces]
+        stype = "GroundSurface" if z_mean < np.mean(z_all) else "RoofSurface"
+        surfaces.append((stype, horizontal[0]))
+    
+    return surfaces
