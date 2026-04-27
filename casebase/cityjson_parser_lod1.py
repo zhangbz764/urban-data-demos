@@ -15,12 +15,21 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
     with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
 
+    # 空文件检查
+    if not data.get("CityObjects") or not data.get("vertices"):
+        print(f"空文件，跳过：{filepath}")
+        return []
+
     scale = np.array(data["transform"]["scale"])
+    if np.all(scale == 0):
+        print(f"无效scale，跳过：{filepath}")
+        return []
     translate = np.array(data["transform"]["translate"])
     vertices = np.array(data["vertices"])
     real_vertices = vertices * scale + translate
 
     buildings = []
+    no_lod1_count = 0
     for obj_id, obj in data["CityObjects"].items():
         if obj["type"] not in ("Building", "BuildingPart"):
             continue
@@ -33,7 +42,9 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
 
         geom_entry = next((g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod), None)
         if geom_entry is None:
-            print(f"No LOD1 geometry for building: {obj_id}")
+            no_lod1_count += 1
+            # if no_lod1_count <= 2:  # 只打印前3条
+            #     print(f"No LOD1 geometry for building: {obj_id}")
             continue
 
         faces = []
@@ -55,7 +66,7 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
         roof_face = next((f for stype, f in surfaces if stype == "RoofSurface"), None)
 
         if ground_face is None:
-            print(f"No ground face for building: {obj_id}")
+            print(f"No ground face for building: {obj_id} >>> {filepath}") 
             continue
 
         ground_z = float(np.mean([c[2] for c in ground_face.exterior.coords]))
@@ -80,7 +91,8 @@ def parse_cityjson_lod1(filepath, target_lod="1"):
             "geom_2d": geom_2d,
             "surfaces": surfaces
         })
-
+    # if no_lod1_count > 0:
+    #     print(f"{filepath} >>> 总共 {no_lod1_count} 个建筑无 LOD1 几何")
     return buildings
 
 
@@ -142,19 +154,124 @@ def insert_buildings_lod1(buildings, conn, lod1_table, surface_table,
 
     return len(building_rows), building_counter, surface_counter
 
+# --------------------- Special parser & insert: Amsterdam ---------------------
+def parse_cityjson_lod1_NL_AM(filepath, target_lod="1.3"):
+    with open(filepath, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    scale         = np.array(data["transform"]["scale"])
+    translate     = np.array(data["transform"]["translate"])
+    vertices      = np.array(data["vertices"])
+    real_vertices = vertices * scale + translate
+
+    # 先建立Building属性查找表
+    building_attrs = {}
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] == "Building":
+            building_attrs[obj_id] = obj.get("attributes", {})
+
+    buildings = []
+    for obj_id, obj in data["CityObjects"].items():
+        if obj["type"] != "BuildingPart":
+            continue
+
+        # 从父级Building取属性
+        parent_id = obj_id.rsplit("-", 1)[0]
+        attrs     = building_attrs.get(parent_id, {})
+
+        height      = attrs.get("b3_h_dak_50p")
+        floor_count = attrs.get("b3_bouwlagen")
+        function    = attrs.get("status")
+
+        geom_entry = next(
+            (g for g in obj.get("geometry", []) if str(g.get("lod")) == target_lod),
+            None
+        )
+        if geom_entry is None:
+            continue
+
+        # LOD1: 直接从boundaries重建faces，无semantics
+        faces = []
+        for shell in geom_entry["boundaries"]:
+            for face in shell:
+                ring   = face[0]
+                coords = [tuple(real_vertices[i]) for i in ring]
+                if len(coords) >= 3:
+                    faces.append(Polygon(coords))
+
+        if not faces:
+            print(f"No valid faces for building: {obj_id}")
+            continue
+
+        surfaces = classify_surfaces(faces)
+
+        ground_face = next((f for stype, f in surfaces if stype == "GroundSurface"), None)
+        roof_face   = next((f for stype, f in surfaces if stype == "RoofSurface"), None)
+
+        if ground_face is None:
+            print(f"No ground face for building: {obj_id}")
+            continue
+
+        ground_z = float(np.mean([c[2] for c in ground_face.exterior.coords]))
+
+        if height is None:
+            if roof_face is None:
+                print(f"No roof face and no height attribute for building: {obj_id}")
+                continue
+            top_z  = float(np.mean([c[2] for c in roof_face.exterior.coords]))
+            height = top_z - ground_z
+        else:
+            height = float(height)
+
+        geom_2d = Polygon([(c[0], c[1]) for c in ground_face.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "ground_z":    ground_z,
+            "floor_count": floor_count,
+            "function":    function,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
+
 # --------------------- Exception handling for data standardization ---------------------
 
+# def get_normal(poly):
+#     coords = np.array(poly.exterior.coords[:-1])
+#     if len(coords) < 3:  # 已有这个检查
+#         return None
+#     v1 = coords[1] - coords[0]
+#     v2 = coords[2] - coords[0]
+#     # 两个向量如果维度不对就返回None
+#     if v1.shape != (3,) or v2.shape != (3,):
+#         return None
+#     normal = np.cross(v1, v2)
+#     norm = np.linalg.norm(normal)
+#     if norm == 0:
+#         return None
+#     return normal / norm
+
 def get_normal(poly):
-    coords = np.array(poly.exterior.coords[:-1])
-    if len(coords) < 3:
+    pts = np.array(poly.exterior.coords[:-1])
+    if len(pts) < 3 or pts.shape[1] != 3:
         return None
-    v1 = coords[1] - coords[0]
-    v2 = coords[2] - coords[0]
-    normal = np.cross(v1, v2)
-    norm = np.linalg.norm(normal)
-    if norm == 0:
+    # 遍历顶点对，找到第一个不共线的组合
+    v0 = pts[0]
+    v1 = None
+    for p in pts[1:]:
+        if np.linalg.norm(p - v0) > 1e-6:
+            v1 = p
+            break
+    if v1 is None:
         return None
-    return normal / norm
+    for p in pts[1:]:
+        candidate = np.cross(v1 - v0, p - v0)
+        if np.linalg.norm(candidate) > 1e-6:
+            return candidate / np.linalg.norm(candidate)
+    return None
 
 def classify_surfaces(faces):
     horizontal = []

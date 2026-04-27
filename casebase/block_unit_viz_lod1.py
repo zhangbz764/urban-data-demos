@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "hamburg"
+city_name = "berlin"
 # z_scale = 0.3048  # 英尺
 z_scale = 1 # 米
 
@@ -134,7 +134,7 @@ def build_block_mesh(idx):
                 continue
             mesh = polygon_to_mesh(coords, cx, cy, base_z,
                                 meters_per_deg_lon, meters_per_deg_lat, z_scale)
-            if mesh is None or mesh.n_points == 0:
+            if mesh is None or mesh.n_points == 0 or mesh.n_cells == 0:
                 continue
 
             if stype == "RoofSurface":
