@@ -10,6 +10,7 @@ import json
 import numpy as np
 from shapely.geometry import Polygon
 from shapely.wkt import dumps as wkt_dumps
+from lxml import etree
 
 def parse_cityjson_lod1(filepath, target_lod="1"):
     """解析CityJSON文件并提取LOD1建筑物数据。"""
@@ -327,6 +328,87 @@ def parse_cityjson_lod1_US(filepath, target_lod="1"):
     #     print(f"{filepath} >>> 总共 {no_lod1_count} 个建筑无 LOD1 几何")
     return buildings
 
+
+# 命名空间
+NS = {
+    "bldg": "http://www.opengis.net/citygml/building/2.0",
+    "gml":  "http://www.opengis.net/gml",
+    "core": "http://www.opengis.net/citygml/2.0",
+}
+
+def parse_citygml_lod1_JP(filepath):
+    tree = etree.parse(filepath)
+    root = tree.getroot()
+
+    buildings = []
+
+    for bldg_el in root.iter("{http://www.opengis.net/citygml/building/2.0}Building"):
+        obj_id = bldg_el.get("{http://www.opengis.net/gml}id")
+
+        # 属性
+        def get_attr(tag):
+            el = bldg_el.find(f".//bldg:{tag}", NS)
+            return el.text if el is not None else None
+
+        height      = get_attr("measuredHeight")
+        floor_count = get_attr("storeysAboveGround")
+        function    = get_attr("usage")
+
+        height      = float(height) if height is not None else None
+        floor_count = int(floor_count) if floor_count is not None and floor_count != "9999" else None
+
+        # LOD1几何
+        solid_el = bldg_el.find(".//bldg:lod1Solid/gml:Solid", NS)
+        if solid_el is None:
+            continue
+
+        faces = []
+        for poslist_el in solid_el.iter("{http://www.opengis.net/gml}posList"):
+            vals = list(map(float, poslist_el.text.strip().split()))
+            # 日本格式：纬度 经度 Z，每3个一组
+            coords = []
+            for i in range(0, len(vals) - 2, 3):
+                lat, lon, z = vals[i], vals[i+1], vals[i+2]
+                coords.append((lon, lat, z))  # 交换为经度/纬度
+            if len(coords) >= 3:
+                faces.append(Polygon(coords))
+
+        if not faces:
+            continue
+
+        surfaces = classify_surfaces_flat(faces)
+
+        ground_face = next((f for stype, f in surfaces if stype == "GroundSurface"), None)
+        roof_face   = next((f for stype, f in surfaces if stype == "RoofSurface"), None)
+
+        if ground_face is None:
+            print(f"No ground face: {obj_id}")
+            continue
+
+        ground_z = float(np.mean([c[2] for c in ground_face.exterior.coords]))
+
+        if height is None:
+            if roof_face is None:
+                print(f"No roof face and no height: {obj_id}")
+                continue
+            top_z  = float(np.mean([c[2] for c in roof_face.exterior.coords]))
+            height = top_z - ground_z
+        else:
+            height = float(height)
+
+        geom_2d = Polygon([(c[0], c[1]) for c in ground_face.exterior.coords])
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      height,
+            "ground_z":    ground_z,
+            "floor_count": floor_count,
+            "function":    function,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
 
 # --------------------- Exception handling for data standardization ---------------------
 

@@ -17,11 +17,11 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "newyork"
+city_name = "tallinn"
 # z_scale = 0.3048  # 英尺
 z_scale = 1 # 米
 
-block_table_name        = f"blocks.{city_name}_blocks"
+block_table_name        = f"block.{city_name}_blocks"
 lod2_table_name         = f"lod2.{city_name}_buildings_lod2"
 lod2_surface_table_name = f"lod2.{city_name}_building_surfaces_lod2"
 

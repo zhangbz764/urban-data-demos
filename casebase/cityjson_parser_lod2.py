@@ -10,6 +10,7 @@ import json
 import numpy as np
 from shapely.geometry import Polygon
 from shapely.wkt import dumps as wkt_dumps
+from lxml import etree
 
 def parse_cityjson_lod2(filepath, target_lod="2"):
     """Parse a single LOD2 CityJSON file, return buildings with 2D footprint and classified 3D surfaces"""
@@ -790,6 +791,122 @@ def parse_cityjson_lod2_CZ_PR(filepath):
         })
 
     return buildings
+
+def parse_gml_lod2_EE_TL(filepath):
+    tree = etree.parse(filepath)
+    root = tree.getroot()
+
+    NS = {
+        "bldg": "http://www.opengis.net/citygml/building/2.0",
+        "gml":  "http://www.opengis.net/gml",
+        "core": "http://www.opengis.net/citygml/2.0",
+    }
+
+    def parse_poslist(poslist_el):
+        vals = list(map(float, poslist_el.text.strip().split()))
+        coords = []
+        for i in range(0, len(vals) - 2, 3):
+            northing, easting, z = vals[i], vals[i+1], vals[i+2]
+            coords.append((easting, northing, z))  # 交换为(东向, 北向, Z)
+        return coords
+
+    def infer_surface_type(poly, base_z):
+        coords = list(poly.exterior.coords)
+        z_values = [c[2] for c in coords if len(c) > 2]
+        if not z_values:
+            return "WallSurface"
+
+        pts = np.array(coords)
+        v0 = pts[0]
+        v1 = None
+        for p in pts[1:]:
+            if np.linalg.norm(p - v0) > 1e-6:
+                v1 = p
+                break
+        if v1 is not None:
+            for p in pts[1:]:
+                candidate = np.cross(v1 - v0, p - v0)
+                if np.linalg.norm(candidate) > 1e-6:
+                    normal_z = abs(candidate[2] / np.linalg.norm(candidate))
+                    if normal_z > 0.7:
+                        return "GroundSurface" if min(z_values) <= base_z + 0.5 else "RoofSurface"
+                    break
+
+        return "WallSurface"
+
+    buildings = []
+    for bldg_el in root.iter("{http://www.opengis.net/citygml/building/2.0}Building"):
+        obj_id = bldg_el.get("{http://www.opengis.net/gml}id")
+
+        # 属性
+        def get_attr(tag, ns="bldg"):
+            el = bldg_el.find(f".//{ns}:{tag}", NS)
+            return el.text if el is not None else None
+
+        height   = get_attr("measuredHeight")
+        height   = float(height) if height is not None else None
+        function = get_attr("tyyp")  # 爱沙尼亚用tyyp
+
+        # LOD2几何：遍历所有surfaceMember
+        lod2_el = bldg_el.find(".//bldg:lod2MultiSurface", NS)
+        if lod2_el is None:
+            lod2_el = bldg_el.find(".//bldg:lod2Solid", NS)
+        if lod2_el is None:
+            continue
+
+        faces = []
+        for poslist_el in lod2_el.iter("{http://www.opengis.net/gml}posList"):
+            coords = parse_poslist(poslist_el)
+            if len(coords) >= 3:
+                faces.append(Polygon(coords))
+
+        if not faces:
+            print(f"No faces for building: {obj_id}")
+            continue
+
+        # 确定base_z
+        all_z = [c[2] for face in faces for c in face.exterior.coords if len(face.exterior.coords[0]) > 2]
+        if not all_z:
+            continue
+        base_z = min(all_z)
+
+        # 推断surface类型
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+        for face in faces:
+            stype = infer_surface_type(face, base_z)
+            if stype in surfaces:
+                surfaces[stype].append((face, None))  # None占位citygml_id
+
+        if not surfaces["GroundSurface"]:
+            print(f"No ground face for building: {obj_id}")
+            continue
+
+        ground = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        # height兜底
+        if height is None:
+            if surfaces["RoofSurface"]:
+                roof = surfaces["RoofSurface"][0][0]
+                top_z = float(np.mean([c[2] for c in roof.exterior.coords]))
+                height = top_z - base_z
+            else:
+                print(f"No height for building: {obj_id}")
+                continue
+
+        buildings.append({
+            "citygml_id":  obj_id,
+            "height":      float(height),
+            "floor_count": None,  # 爱沙尼亚数据无层数
+            "function":    function,
+            "roof_type":   None,
+            "year_built":  None,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        })
+
+    return buildings
+
 # --------------------- Exception handling for data standardization ---------------------
 
 # Handle inconsistent boundary hierarchy issues
