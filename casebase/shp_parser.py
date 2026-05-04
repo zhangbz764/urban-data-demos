@@ -1,48 +1,81 @@
 from shapely.wkt import dumps as wkt_dumps
 from shapely.wkt import loads as wkt_loads
 from shapely.geometry import Polygon
+import pandas as pd
 
-def insert_buildings_shp_toronto(gdf, conn, lod1_table, city_prefix,
-                                  building_counter):
-    # TODO: 筛除了multipolygon，筛除了没有高度的，目前处理的是3857
+ # TODO: 筛除了multipolygon，筛除了没有高度的，目前处理的是3857
+def insert_buildings_shp(gdf, conn, lod1_table, city_prefix,
+                          building_counter,
+                          col_height=None,
+                          col_height_top=None,
+                          col_height_bottom=None,
+                          col_ground_z=None,
+                          col_citygml_id=None,
+                          col_floor_count=None,
+                          set_crs=None):
+    """
+    通用SHP建筑入库函数
+    高度支持两种模式：
+    - 直接提供：col_height（相对高度字段）
+    - 计算得到：col_height_top - col_height_bottom（绝对高程相减）
+    """
+    gdf = gdf.copy()
+
+    # 高度处理
+    if col_height is not None:
+        gdf['_height'] = gdf[col_height]
+    elif col_height_top is not None and col_height_bottom is not None:
+        gdf['_height'] = gdf[col_height_top] - gdf[col_height_bottom]
+    else:
+        raise ValueError("必须提供col_height，或者同时提供col_height_top和col_height_bottom")
+
+    #print(f"原始建筑数：{len(gdf)}")
+    
     # 过滤无效数据
-    gdf_valid = gdf[gdf['MAX_HEIGHT'] > 0].copy()
-    print(f"过滤后建筑数：{len(gdf_valid)}")
+    gdf = gdf[gdf['_height'].notna() & (gdf['_height'] > 0)]
+    if col_ground_z:
+        gdf = gdf[gdf[col_ground_z].notna()]
+    #print(f"过滤后建筑数：{len(gdf)}")
 
     # 转4326
-    gdf_valid = gdf_valid.to_crs(4326)
+    if set_crs:
+        gdf = gdf.set_crs(set_crs, allow_override=True).to_crs(4326)
+    else:
+        gdf = gdf.to_crs(4326)
 
     cur = conn.cursor()
     sql = f"""
         INSERT INTO {lod1_table}
-            (building_id, citygml_id, geom_2d, height, ground_z, function)
-        VALUES (%s, %s, ST_GeomFromText(%s, 4326), %s, %s, %s)
+            (building_id, citygml_id, geom_2d, height, ground_z, floor_count, function)
+        VALUES (%s, %s, ST_GeomFromText(%s, 4326), %s, %s, %s, %s)
         ON CONFLICT (building_id) DO NOTHING;
     """
 
     rows = []
-    for _, row in gdf_valid.iterrows():
+    for _, row in gdf.iterrows():
         building_id = f"{city_prefix}_B_{str(building_counter).zfill(7)}"
         building_counter += 1
 
-        # geometry转2D（去掉Z）
         geom = row.geometry
         if geom is None or geom.is_empty:
             continue
         if geom.geom_type == 'MultiPolygon':
-            # 取面积最大的polygon
             geom = max(geom.geoms, key=lambda g: g.area)
 
-        geom_2d = Polygon([(c[0], c[1]) for c in geom.exterior.coords])
-
+        geom_2d     = Polygon([(c[0], c[1]) for c in geom.exterior.coords])
+        citygml_id  = str(row[col_citygml_id]) if col_citygml_id else None
+        ground_z    = float(row[col_ground_z]) if col_ground_z else 0.0
+        height      = float(row['_height'])
+        floor_count = int(row[col_floor_count]) if col_floor_count and pd.notna(row[col_floor_count]) else None
 
         rows.append((
             building_id,
-            None,                        # 无citygml_id
+            citygml_id,
             wkt_dumps(geom_2d),
-            float(row['MAX_HEIGHT']),
-            float(row['SURF_ELEV']),
-            None                         # 无function字段
+            height,
+            ground_z,
+            floor_count,
+            None  # function
         ))
 
     cur.executemany(sql, rows)
@@ -121,7 +154,7 @@ def generate_surfaces_from_buildings(conn, lod1_table, surface_table, city_prefi
             cur.executemany(sql, batch)
             conn.commit()
             batch = []
-            print(f"已插入surface：{surface_counter - 1}", flush=True)
+            print(f"\r已插入surface：{surface_counter - 1}", end='', flush=True)
 
     # 插入剩余
     if batch:
