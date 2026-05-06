@@ -12,6 +12,7 @@ def insert_buildings_shp(gdf, conn, lod1_table, city_prefix,
                           col_ground_z=None,
                           col_citygml_id=None,
                           col_floor_count=None,
+                          col_function=None,
                           set_crs=None):
     """
     通用SHP建筑入库函数
@@ -67,7 +68,7 @@ def insert_buildings_shp(gdf, conn, lod1_table, city_prefix,
         ground_z    = float(row[col_ground_z]) if col_ground_z else 0.0
         height      = float(row['_height'])
         floor_count = int(row[col_floor_count]) if col_floor_count and pd.notna(row[col_floor_count]) else None
-
+        function    = str(row[col_function]) if col_function and pd.notna(row[col_function]) else None
         rows.append((
             building_id,
             citygml_id,
@@ -75,7 +76,7 @@ def insert_buildings_shp(gdf, conn, lod1_table, city_prefix,
             height,
             ground_z,
             floor_count,
-            None  # function
+            function
         ))
 
     cur.executemany(sql, rows)

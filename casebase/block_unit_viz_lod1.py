@@ -17,7 +17,7 @@ conn = psycopg2.connect(
     port=5432,
 )
 
-city_name = "winnipeg"
+city_name = "zurich"
 # z_scale = 0.3048  # 英尺
 z_scale = 1 # 米
 
