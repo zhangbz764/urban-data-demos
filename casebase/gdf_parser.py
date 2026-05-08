@@ -90,6 +90,7 @@ import numpy as np
 
 def insert_buildings_gdf_lod1(gdf, conn, lod1_table, city_prefix,
                           building_counter,
+                          col_geom="geometry",
                           col_height=None,
                           col_area=None,
                           col_perimeter=None,
@@ -115,7 +116,7 @@ def insert_buildings_gdf_lod1(gdf, conn, lod1_table, city_prefix,
     else:
         raise ValueError("必须提供col_height，或者同时提供col_height_top和col_height_bottom")
 
-    #print(f"原始建筑数：{len(gdf)}")
+    print(f"原始建筑数：{len(gdf)}")
     
     # 过滤无效数据
     gdf = gdf[gdf['_height'].notna() & (gdf['_height'] > 0)]
@@ -142,7 +143,7 @@ def insert_buildings_gdf_lod1(gdf, conn, lod1_table, city_prefix,
         building_id = f"{city_prefix}_B_{str(building_counter).zfill(7)}"
         building_counter += 1
 
-        geom = row.geometry
+        geom = row[col_geom]
         if geom is None or geom.is_empty:
             continue
         if geom.geom_type == 'MultiPolygon':
@@ -444,6 +445,8 @@ def generate_surfaces_from_buildings(conn, lod1_table, surface_table, city_prefi
         cur.executemany(sql, batch)
         conn.commit()
 
+    # 确保进度行结束
+    print()
     cur.close()
 
     # 统计
@@ -454,5 +457,5 @@ def generate_surfaces_from_buildings(conn, lod1_table, surface_table, city_prefi
         GROUP BY surface_type ORDER BY surface_type
     """)
     for row in cur.fetchall():
-        print(f"  {row[0]}: {row[1]}")
+        print(f"{row[0]}: {row[1]}")
     cur.close()

@@ -792,7 +792,19 @@ def parse_cityjson_lod2_CZ_PR(filepath):
 
     return buildings
 
-def parse_gml_lod2_EE_TL(filepath):
+def parse_gml_lod2(filepath,
+                    swap_xy=False,
+                    col_height="measuredHeight",
+                    col_floor_count=None,
+                    col_function=None,
+                    col_roof_type=None,
+                    col_year_built=None,
+                    col_citygml_id=None):
+    """
+    通用LOD2 GML解析函数
+    swap_xy: 坐标轴顺序是否需要交换（如塔林3301需要交换）
+    col_*:   各属性字段名，None表示该字段不存在
+    """
     tree = etree.parse(filepath)
     root = tree.getroot()
 
@@ -806,16 +818,18 @@ def parse_gml_lod2_EE_TL(filepath):
         vals = list(map(float, poslist_el.text.strip().split()))
         coords = []
         for i in range(0, len(vals) - 2, 3):
-            northing, easting, z = vals[i], vals[i+1], vals[i+2]
-            coords.append((easting, northing, z))  # 交换为(东向, 北向, Z)
+            a, b, z = vals[i], vals[i+1], vals[i+2]
+            if swap_xy:
+                coords.append((b, a, z))
+            else:
+                coords.append((a, b, z))
         return coords
 
-    def infer_surface_type(poly, base_z):
+    def infer_surface_type(poly, base_z): # TODO: 提取为通用函数？
         coords = list(poly.exterior.coords)
         z_values = [c[2] for c in coords if len(c) > 2]
         if not z_values:
             return "WallSurface"
-
         pts = np.array(coords)
         v0 = pts[0]
         v1 = None
@@ -831,79 +845,122 @@ def parse_gml_lod2_EE_TL(filepath):
                     if normal_z > 0.7:
                         return "GroundSurface" if min(z_values) <= base_z + 0.5 else "RoofSurface"
                     break
-
         return "WallSurface"
+
+    def parse_building(bldg_el):
+        obj_id = bldg_el.get("{http://www.opengis.net/gml}id")
+
+        def get_attr(tag):
+            el = bldg_el.find(f".//{{{NS['bldg']}}}{tag}")
+            if el is not None and el.text:
+                return el.text.strip()
+            # 尝试通用属性标签
+            for child in bldg_el.iter():
+                local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+                if local == tag and child.text:
+                    return child.text.strip()
+            return None
+
+        height      = float(get_attr(col_height)) if col_height and get_attr(col_height) else None
+        floor_count = get_attr(col_floor_count) if col_floor_count else None
+        floor_count = int(float(floor_count)) if floor_count else None
+        function    = get_attr(col_function) if col_function else None
+        roof_type   = get_attr(col_roof_type) if col_roof_type else None
+        year_built  = get_attr(col_year_built) if col_year_built else None
+        year_built  = int(year_built) if year_built else None
+        citygml_id  = get_attr(col_citygml_id) if col_citygml_id else obj_id
+
+        # LOD2几何：优先lod2Solid，其次lod2MultiSurface
+        lod2_el = bldg_el.find(".//bldg:lod2Solid", NS)
+        if lod2_el is None:
+            lod2_el = bldg_el.find(".//bldg:lod2MultiSurface", NS)
+        if lod2_el is None:
+            return None
+
+        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
+
+        # 尝试读取语义面
+        semantic_tags = {
+            f"{{{NS['bldg']}}}RoofSurface":    "RoofSurface",
+            f"{{{NS['bldg']}}}WallSurface":    "WallSurface",
+            f"{{{NS['bldg']}}}GroundSurface":  "GroundSurface",
+            f"{{{NS['bldg']}}}ClosureSurface": "ClosureSurface",
+        }
+
+        has_semantics = any(bldg_el.find(f".//{tag}", {}) is not None
+                           for tag in semantic_tags)
+
+        if has_semantics:
+            for sem_tag, stype in semantic_tags.items():
+                if stype == "ClosureSurface":
+                    continue
+                for sem_el in bldg_el.iter(sem_tag):
+                    sem_id = sem_el.get("{http://www.opengis.net/gml}id")
+                    for poslist_el in sem_el.iter("{http://www.opengis.net/gml}posList"):
+                        coords = parse_poslist(poslist_el)
+                        if len(coords) >= 3:
+                            surfaces[stype].append((Polygon(coords), sem_id))
+        else:
+            # 无语义则用infer
+            faces = []
+            for poslist_el in lod2_el.iter("{http://www.opengis.net/gml}posList"):
+                coords = parse_poslist(poslist_el)
+                if len(coords) >= 3:
+                    faces.append(Polygon(coords))
+
+            if not faces:
+                return None
+
+            all_z = [c[2] for face in faces for c in face.exterior.coords]
+            base_z = min(all_z) if all_z else 0
+
+            for face in faces:
+                stype = infer_surface_type(face, base_z)
+                if stype in surfaces:
+                    surfaces[stype].append((face, None))
+
+        if not surfaces["GroundSurface"]:
+            print(f"No ground face: {obj_id}")
+            return None
+
+        ground  = surfaces["GroundSurface"][0][0]
+        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
+
+        all_z = [c[2] for stype_list in surfaces.values()
+                 for poly, _ in stype_list
+                 for c in poly.exterior.coords]
+        base_z = min(all_z) if all_z else 0
+
+        if height is None:
+            if surfaces["RoofSurface"]:
+                roof   = surfaces["RoofSurface"][0][0]
+                top_z  = float(np.mean([c[2] for c in roof.exterior.coords]))
+                height = top_z - base_z
+            else:
+                print(f"No height: {obj_id}")
+                return None
+
+        return {
+            "citygml_id":  str(citygml_id) if citygml_id else obj_id,
+            "height":      float(height),
+            "floor_count": floor_count,
+            "function":    function,
+            "roof_type":   roof_type,
+            "year_built":  year_built,
+            "geom_2d":     geom_2d,
+            "surfaces":    surfaces
+        }
 
     buildings = []
     for bldg_el in root.iter("{http://www.opengis.net/citygml/building/2.0}Building"):
-        obj_id = bldg_el.get("{http://www.opengis.net/gml}id")
+        result = parse_building(bldg_el)
+        if result:
+            buildings.append(result)
 
-        # 属性
-        def get_attr(tag, ns="bldg"):
-            el = bldg_el.find(f".//{ns}:{tag}", NS)
-            return el.text if el is not None else None
-
-        height   = get_attr("measuredHeight")
-        height   = float(height) if height is not None else None
-        function = get_attr("tyyp")  # 爱沙尼亚用tyyp
-
-        # LOD2几何：遍历所有surfaceMember
-        lod2_el = bldg_el.find(".//bldg:lod2MultiSurface", NS)
-        if lod2_el is None:
-            lod2_el = bldg_el.find(".//bldg:lod2Solid", NS)
-        if lod2_el is None:
-            continue
-
-        faces = []
-        for poslist_el in lod2_el.iter("{http://www.opengis.net/gml}posList"):
-            coords = parse_poslist(poslist_el)
-            if len(coords) >= 3:
-                faces.append(Polygon(coords))
-
-        if not faces:
-            print(f"No faces for building: {obj_id}")
-            continue
-
-        # 确定base_z
-        all_z = [c[2] for face in faces for c in face.exterior.coords if len(face.exterior.coords[0]) > 2]
-        if not all_z:
-            continue
-        base_z = min(all_z)
-
-        # 推断surface类型
-        surfaces = {"RoofSurface": [], "WallSurface": [], "GroundSurface": []}
-        for face in faces:
-            stype = infer_surface_type(face, base_z)
-            if stype in surfaces:
-                surfaces[stype].append((face, None))  # None占位citygml_id
-
-        if not surfaces["GroundSurface"]:
-            print(f"No ground face for building: {obj_id}")
-            continue
-
-        ground = surfaces["GroundSurface"][0][0]
-        geom_2d = Polygon([(c[0], c[1]) for c in ground.exterior.coords])
-
-        # height兜底
-        if height is None:
-            if surfaces["RoofSurface"]:
-                roof = surfaces["RoofSurface"][0][0]
-                top_z = float(np.mean([c[2] for c in roof.exterior.coords]))
-                height = top_z - base_z
-            else:
-                print(f"No height for building: {obj_id}")
-                continue
-
-        buildings.append({
-            "citygml_id":  obj_id,
-            "height":      float(height),
-            "floor_count": None,  # 爱沙尼亚数据无层数
-            "function":    function,
-            "roof_type":   None,
-            "year_built":  None,
-            "geom_2d":     geom_2d,
-            "surfaces":    surfaces
-        })
+    for bldg_el in root.iter("{http://www.opengis.net/citygml/building/2.0}BuildingPart"):
+        result = parse_building(bldg_el)
+        if result:
+            buildings.append(result)
 
     return buildings
 
