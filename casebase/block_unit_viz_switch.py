@@ -1,21 +1,27 @@
+import os
 import pyvista as pv
 import numpy as np
 import psycopg2
 import math
 from shapely.wkt import loads as wkt_loads
 import utils_z
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
+db_config = {
+    "host": os.getenv("DB_HOST"),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "port": int(os.getenv("DB_PORT")) # 可以设置默认值并转换类型
+}
 
 # ==============================
 # 数据库连接
 # ==============================
-conn = psycopg2.connect(
-    host="localhost",
-    database="Test20260413",
-    user="postgres",
-    password="we6666",
-    port=5432,
-)
+conn = psycopg2.connect(**db_config)
 
 city_name = "lyon"
 z_scale   = 1  # 米（纽约用0.3048）
@@ -129,11 +135,12 @@ def build_building_mesh(block_id, cx, cy, base_z,
                 continue
 
             if stype == "RoofSurface":
-                color = [180, 80, 80]
+                hex_color = "#f1a493"  
             elif stype == "WallSurface":
-                color = [200, 160, 120]
+                hex_color = "#f8efea"
             else:
-                color = [150, 150, 140]
+                hex_color = "#c1a4a0"
+            color = pv.Color(hex_color).int_rgb
 
             mesh["color"] = np.tile(color, (mesh.n_cells, 1))
             meshes.append(mesh)
@@ -189,6 +196,7 @@ def build_block_mesh(idx):
 # 全局状态
 # ==============================
 plotter     = pv.Plotter(window_size=[1100, 850])
+plotter.set_background("#FFFFFF") 
 current_idx = [0]
 current_lod = [1]  # 初始显示LOD1
 
@@ -221,7 +229,7 @@ def update_buildings_only():
     if block_mesh is not None:
         plotter.add_mesh(
             block_mesh,
-            color="#C8C4B0",
+            color="#e0d0c8",
             opacity=0.5,
             show_edges=False
         )
@@ -230,7 +238,7 @@ def update_buildings_only():
             feature_edges=False,
             manifold_edges=False
         )
-        plotter.add_mesh(block_edges, color="#888880", line_width=2)
+        plotter.add_mesh(block_edges, color="#1F1F1F", line_width=4)
 
     # 重绘建筑
     building_mesh = build_building_mesh(
@@ -250,7 +258,7 @@ def update_buildings_only():
             feature_angle=30,
             manifold_edges=False
         )
-        plotter.add_mesh(building_edges, color="#383838", line_width=1)
+        plotter.add_mesh(building_edges, color="#383838", line_width=1.2)
 
     _add_text()
     # 不reset_camera，保持当前视角

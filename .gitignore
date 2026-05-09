@@ -6,3 +6,4 @@ cache
 /postgresql/images/
 /city2Graph/cache/
 __pycache__
+.env

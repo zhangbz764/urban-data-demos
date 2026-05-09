@@ -1,21 +1,27 @@
+import os
 import pyvista as pv
 import numpy as np
 import psycopg2
 import math
 from shapely.wkt import loads as wkt_loads
 import utils_z
+from dotenv import load_dotenv
 
+# Load environment variables from .env file
+load_dotenv()
+
+db_config = {
+    "host": os.getenv("DB_HOST"),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "port": int(os.getenv("DB_PORT")) # 可以设置默认值并转换类型
+}
 
 # ==============================
 # 数据库连接
 # ==============================
-conn = psycopg2.connect(
-    host="localhost",
-    database="Test20260413",
-    user="postgres",
-    password="we6666",
-    port=5432,
-)
+conn = psycopg2.connect(**db_config)
 
 city_name = "marseille"
 # z_scale = 0.3048  # 英尺
@@ -140,11 +146,12 @@ def build_block_mesh(idx):
                 continue
 
             if stype == "RoofSurface":
-                color = [180, 80, 80]
+                hex_color = "#f1a493"  
             elif stype == "WallSurface":
-                color = [200, 160, 120]
+                hex_color = "#f8efea"
             else:
-                color = [150, 150, 140]
+                hex_color = "#c1a4a0"
+            color = pv.Color(hex_color).int_rgb
 
             mesh["color"] = np.tile(color, (mesh.n_cells, 1))
             
@@ -163,6 +170,7 @@ def build_block_mesh(idx):
 # 全局 plotter（只创建一次）
 # ==============================
 plotter = pv.Plotter(window_size=[1100, 850])
+plotter.set_background("#FFFFFF") 
 current_idx = [0]
 
 
@@ -196,14 +204,14 @@ def update_scene(idx):
         plotter.add_mesh(
             building_edges,
             color="#383838",
-            line_width=1
+            line_width=1.2
         )
 
     if block_mesh is not None:
         # ---- 填充面（无边）----
         plotter.add_mesh(
             block_mesh,
-            color="#C8C4B0",
+            color="#e0d0c8",
             opacity=0.5,
             show_edges=False
         )
@@ -217,14 +225,14 @@ def update_scene(idx):
 
         plotter.add_mesh(
             block_edges,
-            color="#888880",
-            line_width=2
+            color="#1F1F1F",
+            line_width=4
         )
 
     # 显示 Block ID、中心点坐标和面积
     area = block_areas[idx]
     plotter.add_text(
-        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nArea: {area:.2f} m²\nJ/K 切换   Q 退出",
+        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nArea: {area:.2f} m²\nJ/K Switch Block   Q Exit",
         position="upper_left",
         font_size=11
     )

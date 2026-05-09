@@ -25,7 +25,7 @@ def run_cmd(cmd, print_output=True):
     return result
 
 
-def get_conn(dbname="Test20260413", user="postgres", password="we6666", host="localhost", port="5432"):
+def get_conn(dbname, user, password, host, port):
     """Get PostgreSQL database connection."""
     return psycopg2.connect(
         dbname=dbname, user=user,
