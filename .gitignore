@@ -7,3 +7,5 @@ cache
 /city2Graph/cache/
 __pycache__
 .env
+/casebase/record_temp
+.claude
