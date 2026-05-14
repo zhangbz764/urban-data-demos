@@ -23,7 +23,7 @@ db_config = {
 # ==============================
 conn = psycopg2.connect(**db_config)
 
-city_name = "marseille"
+city_name = "sanfrancisco"
 # z_scale = 0.3048  # 英尺
 z_scale = 1 # 米
 
@@ -38,7 +38,8 @@ sql_blocks = f"""
     SELECT bl.block_id, ST_AsText(bl.geom) AS geom_wkt, 
            ST_X(bl.centroid::geometry) AS lon, 
            ST_Y(bl.centroid::geometry) AS lat,
-           bl.area_m2
+           bl.area_m2,
+           bl.elongation, bl.compactness, bl.lod1_building_count, bl.lod1_bcr
     FROM {block_table_name} bl
     WHERE EXISTS (
         SELECT 1 FROM {lod1_table_name} b
@@ -54,6 +55,10 @@ block_wkts          = [r[1] for r in rows]
 block_centroids_lon = [r[2] for r in rows]  # 经度
 block_centroids_lat = [r[3] for r in rows]  # 纬度
 block_areas         = [float(r[4]) for r in rows]  # 面积（平方米）
+block_elogations    = [float(r[5]) for r in rows]  # 细长率
+block_compactness   = [float(r[6]) for r in rows]  #
+block_bld_count     = [int(r[7]) for r in rows]    # LOD1建筑数量
+block_bcr           = [float(r[8]) for r in rows]  # LOD1建筑覆盖率
 
 print(f"Selected {len(block_ids)} blocks")
 
@@ -231,8 +236,12 @@ def update_scene(idx):
 
     # 显示 Block ID、中心点坐标和面积
     area = block_areas[idx]
+    elogation = block_elogations[idx]
+    compactness = block_compactness[idx]
+    bld_count = block_bld_count[idx]
+    bcr = block_bcr[idx]
     plotter.add_text(
-        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nArea: {area:.2f} m²\nJ/K Switch Block   Q Exit",
+        f"Block: {block_id}   [{idx+1}/30]\nCentroid: ({lon:.6f}, {lat:.6f})\nArea: {area:.2f} m²\nElongation: {elogation:.2f}\nCompactness: {compactness:.2f}\nLOD1 Buildings: {bld_count}\nLOD1 BCR: {bcr:.2f}",
         position="upper_left",
         font_size=11
     )
